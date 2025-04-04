@@ -4,17 +4,16 @@ package retry
 import (
 	"context"
 	"errors"
-	"math"
 	"math/rand"
 	"time"
 )
 
 // DefaultRetrier is a Retrier with sensible defaults
 var DefaultRetrier = &Retrier{
-	MaxAttempts: 3,
-	Delay:       100 * time.Millisecond,
-	MaxDelay:    30 * time.Second,
-	Multiplier:  2.0,
+	MaxAttempts:         3,
+	Delay:               100 * time.Millisecond,
+	MaxDelay:            30 * time.Second,
+	Multiplier:          2.0,
 	RandomizationFactor: 0.5,
 }
 
@@ -34,12 +33,12 @@ type Retrier struct {
 	MaxDelay time.Duration
 	// Multiplier is used to increase the delay after each retry
 	Multiplier float64
-	// RandomizationFactor is used to randomize the delay 
+	// RandomizationFactor is used to randomize the delay
 	// to prevent retry storms (0 means no randomization)
 	RandomizationFactor float64
 }
 
-// Do executes the function f until it doesn't return an error or 
+// Do executes the function f until it doesn't return an error or
 // the maximum number of attempts is reached
 func (r *Retrier) Do(f RetryableFunc) error {
 	return r.DoWithContext(context.Background(), f)
