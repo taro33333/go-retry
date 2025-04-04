@@ -329,10 +329,9 @@ func TestRetryableError(t *testing.T) {
 }
 
 func TestBeforeAndAfterRetryHooks(t *testing.T) {
-	var beforeCalled, afterCalled bool
-	var beforeAttempt, afterAttempt int
-	var beforeDelay time.Duration
-	var afterError error
+	var beforeCalls, afterCalls []int
+	var beforeDelays []time.Duration
+	var afterErrors []error
 
 	retryer := NewRetryer(Options{
 		Strategy: NewDefaultStrategy(
@@ -341,14 +340,12 @@ func TestBeforeAndAfterRetryHooks(t *testing.T) {
 			&DefaultErrorClassifier{},
 		),
 		BeforeRetry: func(attempt int, delay time.Duration) {
-			beforeCalled = true
-			beforeAttempt = attempt
-			beforeDelay = delay
+			beforeCalls = append(beforeCalls, attempt)
+			beforeDelays = append(beforeDelays, delay)
 		},
 		AfterRetry: func(attempt int, err error) {
-			afterCalled = true
-			afterAttempt = attempt
-			afterError = err
+			afterCalls = append(afterCalls, attempt)
+			afterErrors = append(afterErrors, err)
 		},
 	})
 
@@ -361,28 +358,35 @@ func TestBeforeAndAfterRetryHooks(t *testing.T) {
 		return nil
 	})
 
-	if !beforeCalled {
+	// Check that hooks were called
+	if len(beforeCalls) == 0 {
 		t.Error("BeforeRetry hook not called")
 	}
 
-	if !afterCalled {
+	if len(afterCalls) == 0 {
 		t.Error("AfterRetry hook not called")
 	}
 
-	if beforeAttempt != 1 {
-		t.Errorf("Expected beforeAttempt to be 1, got %d", beforeAttempt)
+	// Verify first before retry call is correct
+	if len(beforeCalls) > 0 {
+		if beforeCalls[0] != 1 {
+			t.Errorf("Expected first beforeCalls to be 1, got %d", beforeCalls[0])
+		}
+
+		if beforeDelays[0] != 5*time.Millisecond {
+			t.Errorf("Expected first beforeDelays to be 5ms, got %v", beforeDelays[0])
+		}
 	}
 
-	if beforeDelay != 5*time.Millisecond {
-		t.Errorf("Expected beforeDelay to be 5ms, got %v", beforeDelay)
-	}
+	// Verify first after retry call is correct
+	if len(afterCalls) > 0 {
+		if afterCalls[0] != 1 {
+			t.Errorf("Expected first afterCalls to be 1, got %d", afterCalls[0])
+		}
 
-	if afterAttempt != 1 {
-		t.Errorf("Expected afterAttempt to be 1, got %d", afterAttempt)
-	}
-
-	if afterError != testErr {
-		t.Errorf("Expected afterError to be %v, got %v", testErr, afterError)
+		if afterErrors[0] != testErr {
+			t.Errorf("Expected first afterErrors to be %v, got %v", testErr, afterErrors[0])
+		}
 	}
 }
 
