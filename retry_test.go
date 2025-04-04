@@ -3,46 +3,60 @@ package retry
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestRetrier_Do(t *testing.T) {
+func TestRetryer_Do(t *testing.T) {
 	tests := []struct {
 		name        string
-		retrier     *Retrier
+		strategy    RetryStrategy
 		maxAttempts int
 		shouldError bool
 	}{
 		{
 			name: "successful on first attempt",
-			retrier: &Retrier{
-				MaxAttempts: 3,
-				Delay:       1 * time.Millisecond,
-				Multiplier:  2.0,
-			},
+			strategy: NewDefaultStrategy(
+				3, // MaxAttempts
+				&ExponentialBackoff{
+					InitialDelay:        1 * time.Millisecond,
+					MaxDelay:            30 * time.Second,
+					Multiplier:          2.0,
+					RandomizationFactor: 0,
+				},
+				&DefaultErrorClassifier{},
+			),
 			maxAttempts: 1,
 			shouldError: false,
 		},
 		{
 			name: "successful after retries",
-			retrier: &Retrier{
-				MaxAttempts: 3,
-				Delay:       1 * time.Millisecond,
-				Multiplier:  2.0,
-			},
+			strategy: NewDefaultStrategy(
+				3, // MaxAttempts
+				&ExponentialBackoff{
+					InitialDelay:        1 * time.Millisecond,
+					MaxDelay:            30 * time.Second,
+					Multiplier:          2.0,
+					RandomizationFactor: 0,
+				},
+				&DefaultErrorClassifier{},
+			),
 			maxAttempts: 2,
 			shouldError: false,
 		},
 		{
 			name: "exhausts all retries",
-			retrier: &Retrier{
-				MaxAttempts: 3,
-				Delay:       1 * time.Millisecond,
-				Multiplier:  2.0,
-			},
+			strategy: NewDefaultStrategy(
+				3, // MaxAttempts
+				&ExponentialBackoff{
+					InitialDelay:        1 * time.Millisecond,
+					MaxDelay:            30 * time.Second,
+					Multiplier:          2.0,
+					RandomizationFactor: 0,
+				},
+				&DefaultErrorClassifier{},
+			),
 			maxAttempts: 4, // Exceeds MaxAttempts, should fail
 			shouldError: true,
 		},
@@ -51,17 +65,28 @@ func TestRetrier_Do(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var attemptCount int32 = 0
-
-			err := tt.retrier.Do(func() error {
-				if atomic.AddInt32(&attemptCount, 1) >= int32(tt.maxAttempts) {
-					return nil
-				}
-				return errors.New("test error")
+			retryer := NewRetryer(Options{
+				Strategy: tt.strategy,
 			})
 
+			err := retryer.Do(func(attempt int) error {
+				atomic.StoreInt32(&attemptCount, int32(attempt))
+				if attempt >= tt.maxAttempts {
+					return nil
+				}
+				return NewRetryableError(errors.New("test error"))
+			})
+
+			// Get max attempts from strategy
+			maxAttempts := 0
+			if defaultStrategy, ok := tt.strategy.(*DefaultStrategy); ok {
+				maxAttempts = defaultStrategy.MaxAttempts
+			}
+
 			// Verify attempt count
-			if int(attemptCount) != min(tt.maxAttempts, tt.retrier.MaxAttempts) {
-				t.Errorf("Expected %d attempts, got %d", min(tt.maxAttempts, tt.retrier.MaxAttempts), attemptCount)
+			expectedAttempts := min(tt.maxAttempts, maxAttempts)
+			if int(attemptCount) != expectedAttempts {
+				t.Errorf("Expected %d attempts, got %d", expectedAttempts, attemptCount)
 			}
 
 			// Verify error presence
@@ -77,12 +102,18 @@ func TestRetrier_Do(t *testing.T) {
 	}
 }
 
-func TestRetrier_DoWithContext(t *testing.T) {
-	retrier := &Retrier{
-		MaxAttempts: 10,  // Large enough number of attempts
-		Delay:       10 * time.Millisecond,
-		Multiplier:  1.0, // Constant delay
-	}
+func TestRetryer_DoWithContext(t *testing.T) {
+	strategy := NewDefaultStrategy(
+		10, // MaxAttempts - Large enough number of attempts
+		&FixedBackoff{
+			Delay: 10 * time.Millisecond, // Constant delay
+		},
+		&DefaultErrorClassifier{},
+	)
+
+	retryer := NewRetryer(Options{
+		Strategy: strategy,
+	})
 
 	t.Run("context cancellation", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
@@ -91,9 +122,9 @@ func TestRetrier_DoWithContext(t *testing.T) {
 		var attemptCount int32 = 0
 		startTime := time.Now()
 
-		err := retrier.DoWithContext(ctx, func() error {
+		err := retryer.DoWithContext(ctx, func(attempt int) error {
 			atomic.AddInt32(&attemptCount, 1)
-			return errors.New("test error")
+			return NewRetryableError(errors.New("test error"))
 		})
 
 		duration := time.Since(startTime)
@@ -115,95 +146,75 @@ func TestRetrier_DoWithContext(t *testing.T) {
 	})
 }
 
-func TestRetrier_Backoff(t *testing.T) {
-	retrier := &Retrier{
-		MaxAttempts: 4,
-		Delay:       10 * time.Millisecond,
-		MaxDelay:    100 * time.Millisecond,
-		Multiplier:  2.0,
-	}
-
-	var delays []time.Duration
-	expectedDelays := []time.Duration{
-		10 * time.Millisecond, // Initial delay
-		20 * time.Millisecond, // 2x
-		40 * time.Millisecond, // 2x
-	}
-
-	startTime := time.Now()
-	err := retrier.Do(func() error {
-		if len(delays) > 0 {
-			delays = append(delays, time.Since(startTime))
-			startTime = time.Now()
-		} else {
-			delays = append(delays, 0) // No delay for first attempt
-			startTime = time.Now()
+func TestBackoffStrategy_Calculate(t *testing.T) {
+	t.Run("exponential backoff", func(t *testing.T) {
+		backoff := &ExponentialBackoff{
+			InitialDelay:        10 * time.Millisecond,
+			MaxDelay:            100 * time.Millisecond,
+			Multiplier:          2.0,
+			RandomizationFactor: 0, // For predictability
 		}
 
-		if len(delays) >= len(expectedDelays) {
-			return nil
+		expectedDelays := []time.Duration{
+			0,                      // attempt 0
+			10 * time.Millisecond,  // attempt 1 (initial)
+			20 * time.Millisecond,  // attempt 2 (2x)
+			40 * time.Millisecond,  // attempt 3 (2x)
+			80 * time.Millisecond,  // attempt 4 (2x)
+			100 * time.Millisecond, // attempt 5 (max cap)
 		}
-		return errors.New("test error")
+
+		for i, expected := range expectedDelays {
+			actual := backoff.Calculate(i)
+			if actual != expected {
+				t.Errorf("For attempt %d, expected delay %v, got %v", i, expected, actual)
+			}
+		}
 	})
 
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
-
-	// Verify delays match expected pattern
-	// Skip first attempt (no delay)
-	for i := 1; i < len(delays); i++ {
-		tolerance := expectedDelays[i-1] / 2 // 50% tolerance
-		minExpected := expectedDelays[i-1] - tolerance
-		maxExpected := expectedDelays[i-1] + tolerance
-
-		if delays[i] < minExpected || delays[i] > maxExpected {
-			t.Errorf("Expected delay %d to be around %v, got %v", i, expectedDelays[i-1], delays[i])
+	t.Run("fixed backoff", func(t *testing.T) {
+		backoff := &FixedBackoff{
+			Delay: 15 * time.Millisecond,
 		}
-	}
-}
 
-func TestRetrier_MaxDelay(t *testing.T) {
-	retrier := &Retrier{
-		MaxAttempts: 5,
-		Delay:       10 * time.Millisecond,
-		MaxDelay:    15 * time.Millisecond, // Will reach max at second retry
-		Multiplier:  2.0,
-		RandomizationFactor: 0, // For predictability
-	}
-
-	var lastDelay time.Duration
-	var count int32 = 0
-
-	startTime := time.Now()
-	_ = retrier.Do(func() error {
-		count++
-		if count > 1 {
-			currentDelay := time.Since(startTime)
-			lastDelay = currentDelay
-			startTime = time.Now()
-		} else {
-			startTime = time.Now()
+		for i := 0; i < 5; i++ {
+			actual := backoff.Calculate(i)
+			if actual != 15*time.Millisecond {
+				t.Errorf("For attempt %d, expected fixed delay 15ms, got %v", i, actual)
+			}
 		}
-		
-		if count >= 4 {
-			return nil
-		}
-		return errors.New("test error")
 	})
 
-	// Verify the last delay respects max delay setting
-	tolerance := 5 * time.Millisecond
-	if lastDelay < retrier.MaxDelay-tolerance || lastDelay > retrier.MaxDelay+tolerance {
-		t.Errorf("Expected last delay to be around max delay %v, got %v", retrier.MaxDelay, lastDelay)
-	}
+	t.Run("linear backoff", func(t *testing.T) {
+		backoff := &LinearBackoff{
+			InitialDelay: 10 * time.Millisecond,
+			Step:         5 * time.Millisecond,
+			MaxDelay:     25 * time.Millisecond,
+		}
+
+		expectedDelays := []time.Duration{
+			0,                     // attempt 0
+			10 * time.Millisecond, // attempt 1 (initial)
+			15 * time.Millisecond, // attempt 2 (initial + step)
+			20 * time.Millisecond, // attempt 3 (initial + 2*step)
+			25 * time.Millisecond, // attempt 4 (max cap)
+			25 * time.Millisecond, // attempt 5 (max cap)
+		}
+
+		for i, expected := range expectedDelays {
+			actual := backoff.Calculate(i)
+			if actual != expected {
+				t.Errorf("For attempt %d, expected delay %v, got %v", i, expected, actual)
+			}
+		}
+	})
 }
 
-func TestRetrier_RandomizationFactor(t *testing.T) {
-	retrier := &Retrier{
-		MaxAttempts:         3,
-		Delay:               10 * time.Millisecond,
-		Multiplier:          1.0, // Keep delay constant
+func TestExponentialBackoff_Randomization(t *testing.T) {
+	backoff := &ExponentialBackoff{
+		InitialDelay:        10 * time.Millisecond,
+		MaxDelay:            100 * time.Millisecond,
+		Multiplier:          1.0, // Keep delay constant for testing randomization
 		RandomizationFactor: 0.5, // 50% randomization
 	}
 
@@ -211,16 +222,7 @@ func TestRetrier_RandomizationFactor(t *testing.T) {
 	const sampleSize = 10
 
 	for i := 0; i < sampleSize; i++ {
-		startTime := time.Now()
-		_ = retrier.Do(func() error {
-			if startTime.IsZero() {
-				startTime = time.Now()
-				return errors.New("retry")
-			}
-			
-			delays = append(delays, time.Since(startTime))
-			return nil
-		})
+		delays = append(delays, backoff.Calculate(1))
 	}
 
 	// Verify variation in delays
@@ -239,70 +241,71 @@ func TestRetrier_RandomizationFactor(t *testing.T) {
 	}
 
 	// Theoretical min/max range
-	theoreticalMin := time.Duration(float64(retrier.Delay) * (1 - retrier.RandomizationFactor))
-	theoreticalMax := time.Duration(float64(retrier.Delay) * (1 + retrier.RandomizationFactor))
+	theoreticalMin := time.Duration(float64(backoff.InitialDelay) * (1 - backoff.RandomizationFactor))
+	theoreticalMax := time.Duration(float64(backoff.InitialDelay) * (1 + backoff.RandomizationFactor))
 
 	// Verify actual variation is significant (at least 30% of theoretical range)
 	expectedSpread := theoreticalMax - theoreticalMin
 	actualSpread := max - min
-	
-	if actualSpread < expectedSpread*0.3 {
+
+	if actualSpread < time.Duration(float64(expectedSpread)*0.3) {
 		t.Errorf("Expected significant randomization, but got min=%v, max=%v (spread: %v)", min, max, actualSpread)
 	}
 }
 
-func TestRetrier_RetryIf(t *testing.T) {
-	retrier := &Retrier{
-		MaxAttempts: 3,
-		Delay:       1 * time.Millisecond,
+func TestCustomErrorClassifier(t *testing.T) {
+	// Create custom error types
+	permanentErr := errors.New("permanent error")
+	temporaryErr := errors.New("temporary error")
+
+	// Create custom classifier
+	classifier := &CustomErrorClassifier{
+		Classifier: func(err error) bool {
+			return err.Error() == "temporary error"
+		},
 	}
 
-	// Error types for testing
-	retryableErr := errors.New("retryable")
-	nonRetryableErr := errors.New("non-retryable")
+	// Create strategy with custom classifier
+	strategy := NewDefaultStrategy(
+		3,
+		&FixedBackoff{Delay: 1 * time.Millisecond},
+		classifier,
+	)
 
-	t.Run("retries on condition", func(t *testing.T) {
-		var count int32 = 0
-		
-		err := retrier.RetryIf(
-			func() error {
-				count++
-				if count >= 2 {
-					return nil
-				}
-				return retryableErr
-			},
-			func(err error) bool {
-				return err == retryableErr
-			},
-		)
+	retryer := NewRetryer(Options{Strategy: strategy})
+
+	t.Run("retries classified errors", func(t *testing.T) {
+		var attemptCount int32 = 0
+
+		err := retryer.Do(func(attempt int) error {
+			atomic.AddInt32(&attemptCount, 1)
+			if attempt >= 2 {
+				return nil
+			}
+			return temporaryErr
+		})
 
 		if err != nil {
 			t.Errorf("Expected no error, got %v", err)
 		}
-		if count != 2 {
-			t.Errorf("Expected 2 attempts, got %d", count)
+		if attemptCount != 2 {
+			t.Errorf("Expected 2 attempts, got %d", attemptCount)
 		}
 	})
 
-	t.Run("does not retry on condition", func(t *testing.T) {
-		var count int32 = 0
-		
-		err := retrier.RetryIf(
-			func() error {
-				count++
-				return nonRetryableErr
-			},
-			func(err error) bool {
-				return err == retryableErr
-			},
-		)
+	t.Run("doesn't retry unclassified errors", func(t *testing.T) {
+		var attemptCount int32 = 0
 
-		if !strings.Contains(err.Error(), "non-retryable") {
-			t.Errorf("Expected non-retryable error, got %v", err)
+		err := retryer.Do(func(attempt int) error {
+			atomic.AddInt32(&attemptCount, 1)
+			return permanentErr
+		})
+
+		if err == nil {
+			t.Error("Expected error, got nil")
 		}
-		if count != 1 {
-			t.Errorf("Expected 1 attempt, got %d", count)
+		if attemptCount != 1 {
+			t.Errorf("Expected 1 attempt, got %d", attemptCount)
 		}
 	})
 }
@@ -322,6 +325,64 @@ func TestRetryableError(t *testing.T) {
 	// Verify error message is preserved
 	if retryableErr.Error() != originalErr.Error() {
 		t.Errorf("Expected error message %q, got %q", originalErr.Error(), retryableErr.Error())
+	}
+}
+
+func TestBeforeAndAfterRetryHooks(t *testing.T) {
+	var beforeCalled, afterCalled bool
+	var beforeAttempt, afterAttempt int
+	var beforeDelay time.Duration
+	var afterError error
+
+	retryer := NewRetryer(Options{
+		Strategy: NewDefaultStrategy(
+			3,
+			&FixedBackoff{Delay: 5 * time.Millisecond},
+			&DefaultErrorClassifier{},
+		),
+		BeforeRetry: func(attempt int, delay time.Duration) {
+			beforeCalled = true
+			beforeAttempt = attempt
+			beforeDelay = delay
+		},
+		AfterRetry: func(attempt int, err error) {
+			afterCalled = true
+			afterAttempt = attempt
+			afterError = err
+		},
+	})
+
+	testErr := NewRetryableError(errors.New("test error"))
+
+	_ = retryer.Do(func(attempt int) error {
+		if attempt < 2 {
+			return testErr
+		}
+		return nil
+	})
+
+	if !beforeCalled {
+		t.Error("BeforeRetry hook not called")
+	}
+
+	if !afterCalled {
+		t.Error("AfterRetry hook not called")
+	}
+
+	if beforeAttempt != 1 {
+		t.Errorf("Expected beforeAttempt to be 1, got %d", beforeAttempt)
+	}
+
+	if beforeDelay != 5*time.Millisecond {
+		t.Errorf("Expected beforeDelay to be 5ms, got %v", beforeDelay)
+	}
+
+	if afterAttempt != 1 {
+		t.Errorf("Expected afterAttempt to be 1, got %d", afterAttempt)
+	}
+
+	if afterError != testErr {
+		t.Errorf("Expected afterError to be %v, got %v", testErr, afterError)
 	}
 }
 
