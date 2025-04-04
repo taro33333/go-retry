@@ -14,13 +14,13 @@ A simple, flexible and robust retry package for Go applications.
 ## Installation
 
 ```bash
-go get github.com/yourusername/go-retry
+go get github.com/taro33333/go-retry
 ```
 
 ## Basic Usage
 
 ```go
-import "github.com/yourusername/go-retry"
+import "github.com/taro33333/go-retry"
 
 func main() {
     // Using default settings (3 attempts, starting with 100ms delay)
