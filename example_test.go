@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yourusername/go-retry"
+	"github.com/taro33333/go-retry"
 )
 
 // This file contains examples for using the package.
@@ -56,11 +56,11 @@ func Example_successful() {
 func Example_customRetrier() {
 	// Create custom retry configuration
 	customRetrier := &retry.Retrier{
-		MaxAttempts:         2,                  // Maximum 2 attempts
+		MaxAttempts:         2,                     // Maximum 2 attempts
 		Delay:               50 * time.Millisecond, // Initial delay 50ms
-		MaxDelay:            1 * time.Second,    // Maximum delay 1s
-		Multiplier:          2.0,                // Double delay each time
-		RandomizationFactor: 0.1,                // 10% randomization
+		MaxDelay:            1 * time.Second,       // Maximum delay 1s
+		Multiplier:          2.0,                   // Double delay each time
+		RandomizationFactor: 0.1,                   // 10% randomization
 	}
 
 	attempt := 0
@@ -84,7 +84,7 @@ func Example_withContext() {
 	defer cancel()
 
 	startTime := time.Now()
-	
+
 	err := retry.DoWithContext(ctx, func() error {
 		elapsed := time.Since(startTime).Milliseconds()
 		fmt.Printf("Attempt at %dms\n", elapsed)
@@ -133,12 +133,12 @@ func Example_retryIf() {
 func Example_httpRequest() {
 	// This example simulates HTTP requests without making actual requests
 	fmt.Println("HTTP request example (simulation):")
-	
+
 	attempt := 0
 	err := retry.Do(func() error {
 		attempt++
 		fmt.Printf("HTTP request attempt %d\n", attempt)
-		
+
 		if attempt == 1 {
 			// First attempt: 503 error
 			return fmt.Errorf("received status code: %d", http.StatusServiceUnavailable)
